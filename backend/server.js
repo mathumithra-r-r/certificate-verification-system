@@ -1,98 +1,140 @@
 const express = require('express');
 const multer = require('multer');
+const crypto = require('crypto');
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
-const fs = require('fs');
-const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads');
-}
+const upload = multer({ dest: 'uploads/' });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
-});
-const upload = multer({ storage });
+const PINATA_API_KEY = process.env.PINATA_API_KEY;
+const PINATA_SECRET_API_KEY = process.env.PINATA_SECRET_API_KEY;
 
-function saveToBlockchain(entry) {
-  const blockchain = loadBlockchain();
-  blockchain.push(entry);
-  fs.writeFileSync('blockchain.json', JSON.stringify(blockchain, null, 2));
-}
 
-function loadBlockchain() {
-  try {
-    return JSON.parse(fs.readFileSync('blockchain.json'));
-  } catch (e) {
-    return [];
+const CERT_STORE = path.join(__dirname, 'certificates.json');
+
+
+function readCertificates() {
+  if (!fs.existsSync(CERT_STORE)) {
+    fs.writeFileSync(CERT_STORE, JSON.stringify([]));
   }
+  const data = fs.readFileSync(CERT_STORE);
+  return JSON.parse(data);
 }
 
-app.post('/admin/upload', upload.any(), async (req, res) => {
+
+function saveCertificate(cert) {
+  const certs = readCertificates();
+  certs.push(cert);
+  fs.writeFileSync(CERT_STORE, JSON.stringify(certs, null, 2));
+}
+
+
+app.post('/admin/hash', upload.single('certificate'), async (req, res) => {
   try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ message: 'No files uploaded' });
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const file = req.files[0];
-
-    // Now use file.path instead of req.file.path
     const fileBuffer = fs.readFileSync(file.path);
+    const hash = crypto.createHash('sha512').update(fileBuffer).digest('hex');
 
-    const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    fs.unlinkSync(file.path);
+    res.json({ hash });
+  } catch (err) {
+    console.error('Hashing failed:', err);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+
+app.post('/admin/upload', upload.single('certificate'), async (req, res) => {
+  try {
+    const { walletAddress, signature, message } = req.body;
+    const file = req.file;
+
+    if (!file || !walletAddress || !signature || !message) {
+      return res.status(400).json({ error: 'Missing file or MetaMask data' });
+    }
+
+    const fileBuffer = fs.readFileSync(file.path);
+    const hash = crypto.createHash('sha512').update(fileBuffer).digest('hex');
 
     const formData = new FormData();
-    formData.append('file', fs.createReadStream(file.path), file.originalname);
+    formData.append('file', fs.createReadStream(file.path));
 
-    const metadata = JSON.stringify({ name: file.originalname });
-    formData.append('pinataMetadata', metadata);
+    const pinataRes = await axios.post(
+      'https://api.pinata.cloud/pinning/pinFileToIPFS',
+      formData,
+      {
+        maxBodyLength: Infinity,
+        headers: {
+          ...formData.getHeaders(),
+          pinata_api_key: PINATA_API_KEY,
+          pinata_secret_api_key: PINATA_SECRET_API_KEY,
+        },
+      }
+    );
 
-    const options = JSON.stringify({ cidVersion: 1 });
-    formData.append('pinataOptions', options);
+    const ipfs_cid = pinataRes.data.IpfsHash;
 
-    const response = await axios.post('https://api.pinata.cloud/pinning/pinFileToIPFS', formData, {
-      maxBodyLength: Infinity,
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
-        pinata_api_key: process.env.PINATA_API_KEY,
-        pinata_secret_api_key: process.env.PINATA_API_SECRET,
-      },
+    fs.unlinkSync(file.path);
+
+   
+    saveCertificate({
+      walletAddress,
+      hash,
+      ipfs_cid,
+      signature,
+      message,
+      timestamp: Date.now(),
     });
 
-    const cid = response.data.IpfsHash;
-
-    const entry = {
+    res.json({
       hash,
-      ipfs_cid: cid,
-      timestamp: new Date().toISOString(),
-    };
-
-    saveToBlockchain(entry);
-
-    fs.unlinkSync(file.path); // delete file after upload
-    console.log(hash,cid)
-    res.json({ message: 'Certificate uploaded', hash, ipfs_cid: cid });
-  } catch (error) {
-    console.error('Upload failed:', error);
-    res.status(500).json({ message: 'Upload failed', error: error.message });
+      ipfs_cid,
+      walletAddress,
+      signature,
+      message,
+    });
+  } catch (err) {
+    console.error('Upload failed:', err.response?.data || err);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
-app.post('/verifier/verify-hash', (req, res) => {
+app.post('/verify', (req, res) => {
   const { hash } = req.body;
-  const blockchain = loadBlockchain();
-  const found = blockchain.find(entry => entry.hash === hash);
+  if (!hash || hash.length === 0) {
+    return res.status(400).json({ error: 'Hash is required for verification' });
+  }
 
-  if (found) {
-    res.json({ valid: true, ipfs_cid: found.ipfs_cid });
+  const certificates = readCertificates();
+  const cert = certificates.find((c) => c.hash === hash);
+
+  if (cert) {
+    return res.json({
+      verified: true,
+      certificate: cert,
+    });
   } else {
-    res.json({ valid: false });
+    return res.status(404).json({
+      verified: false,
+      message: 'Certificate not found for given hash',
+    });
   }
 });
 
-app.listen(5000, () => console.log('Server running on http://localhost:5000'));
+const PORT = 5000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});

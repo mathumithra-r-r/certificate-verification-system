@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Admin Upload with MetaMask & Blockchain</title>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5/dist/ethers.umd.min.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="container">
+  <h2> Admin - Upload Certificate</h2>
+
+  <p id="walletStatus">MetaMask not connected</p>
+  <button id="connectWalletBtn">🔗 Connect MetaMask</button>
+  <br><br>
+  <div class="b">
+<input type="file" id="certFile" />
+  <button id="uploadBtn" type="button">⬆️ Upload Certificate</button>
+  </div>
+  
+  
+  <p id="adminResult"></p>
+  <a href="Home.html" class="back-btn">⬅ Back</a>
+
+
+  <script>
+    // Replace with your deployed Sepolia contract address
+    const contractAddress = "0xD7ACd2a9FD159E69Bb102A1ca21C9a3e3A5F771B";
+
+    // Replace with your contract ABI JSON (paste the full ABI you have)
+    const contractABI = [
+      // ... your ABI unchanged, as in your snippet ...
+      {
+        "anonymous": false,
+        "inputs": [
+          {"indexed": true,"internalType": "address","name": "uploader","type": "address"},
+          {"indexed": false,"internalType": "string","name": "fileHash","type": "string"},
+          {"indexed": false,"internalType": "string","name": "ipfsCid","type": "string"},
+          {"indexed": false,"internalType": "uint256","name": "timestamp","type": "uint256"}
+        ],
+        "name": "CertificateStored",
+        "type": "event"
+      },
+      {
+        "inputs": [
+          {"internalType": "string","name": "_fileHash","type": "string"},
+          {"internalType": "string","name": "_ipfsCid","type": "string"}
+        ],
+        "name": "storeCertificate",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {"internalType": "string","name": "_fileHash","type": "string"}
+        ],
+        "name": "getCertificate",
+        "outputs": [
+          {"internalType": "address","name": "uploader","type": "address"},
+          {"internalType": "string","name": "fileHash","type": "string"},
+          {"internalType": "string","name": "ipfsCid","type": "string"},
+          {"internalType": "uint256","name": "timestamp","type": "uint256"}
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      }
+    ];
+
+    let userAddress = "";
+    const connectBtn = document.getElementById("connectWalletBtn");
+    const walletStatus = document.getElementById("walletStatus");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const fileInput = document.getElementById("certFile");
+    const result = document.getElementById("adminResult");
+
+    // Function to check and switch to Sepolia network
+    async function checkSepoliaNetwork() {
+      if (window.ethereum) {
+        try {
+          const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+          if (chainId !== '0xaa36a7') {  // Sepolia chainId in hex
+            try {
+              await window.ethereum.request({
+                method: 'wallet_switchEthereumChain',
+                params: [{ chainId: '0xaa36a7' }],
+              });
+              walletStatus.textContent = "✅ Switched to Sepolia network";
+            } catch (switchError) {
+              walletStatus.textContent = "❌ Please switch MetaMask network to Sepolia manually.";
+              throw new Error("User rejected network switch");
+            }
+          } else {
+            walletStatus.textContent = "✅ Connected to Sepolia network";
+          }
+        } catch (err) {
+          console.error("Network check error:", err);
+        }
+      }
+    }
+
+    // MetaMask Connection
+    connectBtn.addEventListener("click", async () => {
+      if (typeof window.ethereum !== "undefined") {
+        try {
+          const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+          userAddress = accounts[0];
+          walletStatus.textContent = `✅ Connected: ${userAddress}`;
+
+          await checkSepoliaNetwork();
+
+        } catch (err) {
+          walletStatus.textContent = "❌ User denied MetaMask connection.";
+        }
+      } else {
+        walletStatus.textContent = "❌ MetaMask not installed!";
+        alert("Please install MetaMask to continue.");
+      }
+    });
+
+    uploadBtn.addEventListener("click", async () => {
+      if (!userAddress) {
+        result.textContent = "❌ Connect MetaMask first!";
+        return;
+      }
+
+      const file = fileInput.files[0];
+      if (!file) {
+        result.textContent = "❌ Please select a file.";
+        return;
+      }
+
+      const formData = new FormData();
+      formData.append('certificate', file);
+
+      result.textContent = "⏳ Calculating file hash...";
+
+      let hash;
+      try {
+        const hashRes = await fetch('http://localhost:5000/admin/hash', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!hashRes.ok) {
+          throw new Error(`Server error: ${hashRes.status}`);
+        }
+
+        const hashData = await hashRes.json();
+        hash = hashData.hash;
+
+        if (!hash || hash.length === 0) {
+          throw new Error("❌ Failed to get valid hash from server.");
+        }
+      } catch (err) {
+        result.textContent = `❌ Failed to hash file: ${err.message}`;
+        return;
+      }
+
+      // Sign the hash with MetaMask
+      let signature;
+      try {
+        signature = await ethereum.request({
+          method: 'personal_sign',
+          params: [hash, userAddress]
+        });
+      } catch (err) {
+        result.textContent = "❌ Signature denied.";
+        return;
+      }
+
+      // Upload file + meta to backend
+      const finalForm = new FormData();
+      finalForm.append('certificate', file);
+      finalForm.append('walletAddress', userAddress);
+      finalForm.append('signature', signature);
+      finalForm.append('message', hash);
+
+      result.textContent = "⏳ Uploading to server...";
+
+      let ipfsCid;
+      try {
+        const uploadRes = await fetch('http://localhost:5000/admin/upload', {
+          method: 'POST',
+          body: finalForm
+        });
+
+        if (!uploadRes.ok) {
+          throw new Error(`Server error: ${uploadRes.status}`);
+        }
+
+        const data = await uploadRes.json();
+        ipfsCid = data.ipfs_cid;
+
+        result.textContent = `✅ Uploaded to IPFS: ${ipfsCid}\n⏳ Storing metadata on blockchain...`;
+      } catch (err) {
+        result.textContent = `❌ Upload failed: ${err.message}`;
+        return;
+      }
+
+      // Store metadata on blockchain
+      try {
+        const provider = new ethers.providers.Web3Provider(window.ethereum);
+        const signer = provider.getSigner();
+        const contract = new ethers.Contract(contractAddress, contractABI, signer);
+
+        const tx = await contract.storeCertificate(hash, ipfsCid);
+        result.textContent = `⏳ Transaction sent. Waiting for confirmation... (Tx: ${tx.hash})`;
+
+        await tx.wait();
+
+        result.innerHTML = `
+          ✅ <strong>Certificate stored on blockchain!</strong><br>
+          📦 IPFS CID: <code>${ipfsCid}</code><br>
+          🔐 File Hash: <code>${hash}</code><br>
+          👤 Wallet: <code>${userAddress}</code><br>
+          📃 <a href="https://gateway.pinata.cloud/ipfs/${ipfsCid}" target="_blank">View Certificate on IPFS</a><br>
+          🔗 <a href="https://sepolia.etherscan.io/tx/${tx.hash}" target="_blank">View Transaction on Sepolia Etherscan</a>
+        `;
+      } catch (err) {
+        console.error(err);
+        result.textContent = `❌ Blockchain transaction failed: ${err.message}`;
+      }
+    });
+  </script>
+</body>
+</html>

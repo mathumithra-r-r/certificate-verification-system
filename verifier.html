@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Certificate Hash Verifier</title>
+  <link rel="stylesheet" href="styles.css">
+  
+</head>
+<body class="container">
+  <h2 class="heading">🔍 Verify Certificate using Hash</h2>
+  <input type="text" id="hashInput" placeholder="Enter file hash (e.g., SHA512)" size="60"/>
+  <br>
+  <button onclick="verifyCertificate()">Verify</button>
+
+  <div id="result"></div>
+  <a href="Home.html" class="back-btn">⬅ Back</a>
+
+  <script>
+    async function verifyCertificate() {
+      const hash = document.getElementById("hashInput").value.trim();
+      const resultDiv = document.getElementById("result");
+      resultDiv.innerHTML = "Checking certificate... ⏳";
+
+      if (!hash) {
+        resultDiv.innerHTML = "<span style='color:red;'>❌ Please enter a hash.</span>";
+        return;
+      }
+
+      try {
+        const response = await fetch('http://localhost:5000/verify', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ hash }),
+        });
+
+        if (response.status === 404) {
+          resultDiv.innerHTML = `<span style='color:red;'>❌ No certificate found for this hash.</span>`;
+          return;
+        }
+
+        if (!response.ok) {
+          throw new Error('Server error');
+        }
+
+        const data = await response.json();
+
+        if (data.verified) {
+          const cert = data.certificate;
+          const time = new Date(cert.timestamp).toLocaleString();
+
+          resultDiv.innerHTML = `
+            ✅ <strong>Certificate Verified</strong><br><br>
+            <strong>Uploader Wallet:</strong> ${cert.walletAddress}<br>
+            <strong>File Hash:</strong> ${cert.hash}<br>
+            <strong>IPFS CID:</strong> <a href="https://ipfs.io/ipfs/${cert.ipfs_cid}" target="_blank">${cert.ipfs_cid}</a><br>
+            <strong>Uploaded On:</strong> ${time}
+          `;
+        } else {
+          resultDiv.innerHTML = `<span style='color:red;'>❌ Certificate not verified.</span>`;
+        }
+      } catch (error) {
+        console.error(error);
+        resultDiv.innerHTML = "<span style='color:red;'>❌ Error verifying certificate. Check console.</span>";
+      }
+    }
+  </script>
+</body>
+</html>

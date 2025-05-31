@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Connect MetaMask</title>
+</head>
+<body>
+  <h2>Connect MetaMask</h2>
+  <p id="status">Not connected</p>
+  <button id="connectBtn">Connect MetaMask</button>
+
+  <script>
+    const status = document.getElementById('status');
+    const btn = document.getElementById('connectBtn');
+
+    btn.onclick = async () => {
+      if (typeof window.ethereum === 'undefined') {
+        alert('MetaMask not installed!');
+        status.textContent = 'MetaMask not installed!';
+        return;
+      }
+      try {
+        const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+        const userAddress = accounts[0];
+        status.textContent = 'Connected: ' + userAddress;
+
+        // Save wallet address in sessionStorage
+        sessionStorage.setItem('walletAddress', userAddress);
+
+        // Redirect to upload page
+        window.location.href = 'upload.html';
+      } catch (err) {
+        status.textContent = 'User denied connection or error.';
+      }
+    };
+  </script>
+</body>
+</html>
